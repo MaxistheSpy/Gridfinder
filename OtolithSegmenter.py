@@ -144,7 +144,11 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
     effect = segmentEditorWidget.activeEffect()
     effect.setParameter("GrowFactor", 0.10)  # Adjust as needed
     effect.self().onApply()
+    effect.self()
 
+    #get 1nn
+    #plan - get centers. get nearest vertical neighbor, group those. print those groups. name them.
+    segmentationNode.GetSegmentCenterRAS()
     # Create a new model node for the segment
     shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(
             slicer.mrmlScene)
@@ -154,7 +158,7 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
 
     # Clean up
     segmentEditorWidget = None
-    slicer.mrmlScene.RemoveNode(segmentationNode)
+    # slicer.mrmlScene.RemoveNode(segmentationNode)
 
 
 
