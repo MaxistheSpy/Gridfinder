@@ -1,6 +1,6 @@
 import vtk, qt, ctk, slicer
 from slicer.ScriptedLoadableModule import *
-
+from functools import partial
 
 
 #
@@ -52,7 +52,7 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
     # Select input volume
     self.inputFile=ctk.ctkPathLineEdit()
     self.inputFile.filters = ctk.ctkPathLineEdit.Files
-    self.inputFile.nameFilters = ["*.nii.gz"] 
+    self.inputFile.nameFilters = ["*.nii.gz"]
     self.inputFile.setToolTip( "Select input volume" )
     parametersFormLayout.addRow("Input volume: ", self.inputFile)
 
@@ -100,6 +100,7 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
     Uses ScriptedLoadableModuleLogic base class, available at:
     https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
     """
+
   def run(self, inputFile):#, outputDirectory):
     volumeNode = slicer.util.loadVolume(inputFile)
     voxelShrinkSize = 2
@@ -118,33 +119,21 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
     segmentEditorWidget.setMRMLSegmentEditorNode(segmentEditorNode)
     segmentEditorWidget.setSegmentationNode(segmentationNode)
     segmentEditorWidget.setSourceVolumeNode(volumeNode)
+    apply_edit = partial(apply_segment_editor_effect, segmentEditorWidget)
 
 
     # Apply Otsu thresholding
-    segmentEditorWidget.setActiveEffectByName("Threshold")
-    effect = segmentEditorWidget.activeEffect()
-    effect.setParameter("AutomaticThresholdMethod", "Otsu")
-    effect.self().onApply()
+    apply_edit(name = "Threshold", params = (("AutomaticThresholdMethod", "Otsu"),))
 
     # Shrink the segment
-    segmentEditorWidget.setActiveEffectByName("Margin")
-    effect = segmentEditorWidget.activeEffect()
-    effect.setParameter("MarginSizeMm", -0.10)  # Adjust as needed
-    effect.self().onApply()
+    apply_edit(name = "Margin", params = (("MarginSizeMm", -0.10),))
 
     # Apply the islands effect
-    segmentEditorWidget.setActiveEffectByName("Islands")
-    effect = segmentEditorWidget.activeEffect()
-    effect.setParameter("Operation", "SPLIT_ISLANDS_TO_SEGMENTS")
-    effect.setParameter("MinimumSize", "1000")  # Adjust as needed
-    effect.self().onApply()
+    islandParams = (("Operation", "SPLIT_ISLANDS_TO_SEGMENTS"), ("MinimumSize", "1000"))
+    apply_edit("Islands", islandParams)
 
     # Grow the segments back to their original size
-    segmentEditorWidget.setActiveEffectByName("Margin")
-    effect = segmentEditorWidget.activeEffect()
-    effect.setParameter("GrowFactor", 0.10)  # Adjust as needed
-    effect.self().onApply()
-    effect.self()
+    apply_edit(name ="Margin", params = (("GrowFactor", 0.10),))
 
     #get 1nn
     #plan - get centers. get nearest vertical neighbor, group those. print those groups. name them.
@@ -192,3 +181,14 @@ class OtolithSegmenterTest(ScriptedLoadableModuleTest):
       your test should break so they know that the feature is needed.
       """
     pass
+
+
+def apply_segment_editor_effect(widget, name: str, params: tuple):
+    widget.setActiveEffectByName(name)
+    effect = widget.activeEffect()
+    print(params)
+    for param in params:
+      print(type(param))
+      effect.setParameter(*param)
+    effect.self().onApply()
+    return effect
