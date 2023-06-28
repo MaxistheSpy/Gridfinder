@@ -1,7 +1,7 @@
+import scipy as sci
 import vtk, qt, ctk, slicer
 from slicer.ScriptedLoadableModule import *
 from functools import partial
-
 
 #
 # OtolithSegmenter
@@ -39,7 +39,8 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
 
   def setup(self):
     ScriptedLoadableModuleWidget.setup(self)
-
+    # self.inputFile.currentPath = "/home/max/Projects/fhl-work/holder/data/Otoliths/otoliths_raw/Holder 1 otolithJuanes1_13.8um_2k low res.nii.gz"
+    # print(self.inputFile,"t")
     # Parameters Area
     #
     parametersCollapsibleButton = ctk.ctkCollapsibleButton()
@@ -50,12 +51,12 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
     parametersFormLayout = qt.QFormLayout(parametersCollapsibleButton)
 
     # Select input volume
-    self.inputFile=ctk.ctkPathLineEdit()
+    self.inputFile= ctk.ctkPathLineEdit()
     self.inputFile.filters = ctk.ctkPathLineEdit.Files
     self.inputFile.nameFilters = ["*.nii.gz"]
     self.inputFile.setToolTip( "Select input volume" )
     parametersFormLayout.addRow("Input volume: ", self.inputFile)
-
+    self.inputFile.currentPath = "/home/max/Projects/fhl-work/holder/data/Otoliths/otoliths_raw/Holder 1 otolithJuanes1_13.8um_2k low res.nii.gz"
     # Select output directory
     #self.outputDirectory=ctk.ctkPathLineEdit()
     #self.outputDirectory.filters = ctk.ctkPathLineEdit.Dirs
@@ -102,12 +103,14 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
     """
 
   def run(self, inputFile):#, outputDirectory):
+    print("hello world")
     volumeNode = slicer.util.loadVolume(inputFile)
     voxelShrinkSize = 2
 
 
     # Create a new segmentation
     segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+    segmentationNode
     segmentationNode.CreateDefaultDisplayNodes() # only needed for display
     segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
     addedSegmentID = segmentationNode.GetSegmentation().AddEmptySegment("otolith")
@@ -137,13 +140,21 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
 
     #get 1nn
     #plan - get centers. get nearest vertical neighbor, group those. print those groups. name them.
-    segmentationNode.GetSegmentCenterRAS()
+    segmentNames = segmentationNode.GetSegmentation().GetSegmentIDs()
+    cords = [(segmentationNode.GetSegmentCenterRAS(id)) for id in segmentNames]
+    distTree = sci.spatial.KDTree(cords)
+    # nearest = [(point,distTree.query(point, k=1)) for point in cords]
+    nearest = distTree.query(cords, k = 2)
+    print(list(enumerate(nearest[1][:,1])))
     # Create a new model node for the segment
-    shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(
-            slicer.mrmlScene)
-    outputFolderId = shNode.CreateFolderItem(shNode.GetSceneItemID(),
-                                                 'ModelsFolder')
-    slicer.modules.segmentations.logic().ExportVisibleSegmentsToModels(segmentationNode, outputFolderId)
+    # shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(
+    #         slicer.mrmlScene)
+    # for item in shNode.GetItemChildren():
+    #   print(item)
+    # outputFolderId = shNode.CreateFolderItem(shNode.GetSceneItemID(),
+    #                                              'ModelsFolder')
+
+    # slicer.modules.segmentations.logic().ExportVisibleSegmentsToModels(segmentationNode, outputFolderId)
 
     # Clean up
     segmentEditorWidget = None
@@ -180,6 +191,7 @@ class OtolithSegmenterTest(ScriptedLoadableModuleTest):
       module.  For example, if a developer removes a feature that you depend on,
       your test should break so they know that the feature is needed.
       """
+    slicer.util.selectModule('OtolithSegmenter')
     pass
 
 
