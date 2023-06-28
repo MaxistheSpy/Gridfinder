@@ -20,6 +20,7 @@ include(${Slicer_USE_FILE})
 #-----------------------------------------------------------------------------
 # Extension modules
 add_subdirectory(OtolithSegmenter)
+add_subdirectory(Oseg)
 ## NEXT_MODULE
 
 #-----------------------------------------------------------------------------
