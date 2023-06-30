@@ -2,7 +2,6 @@ import scipy as sci
 import vtk, qt, ctk, slicer
 from slicer.ScriptedLoadableModule import *
 from functools import partial
-
 #
 # OtolithSegmenter
 #
@@ -17,13 +16,13 @@ class OtolithSegmenter(ScriptedLoadableModule):
     self.parent.title = "OtolithSegmenter" # TODO make this more human readable by adding spaces
     self.parent.categories = ["Examples"]
     self.parent.dependencies = []
-    self.parent.contributors = ["Arthur Porto"] # replace with "Firstname Lastname (Organization)"
+    self.parent.contributors = ["Arthur Porto", "Maximilian McKnight"] # replace with "Firstname Lastname (Organization)"
     self.parent.helpText = """
       This module takes a volume and segments it using automated approaches. The output segments are converted to models.
       """
     self.parent.helpText += self.getDefaultModuleDocumentationLink()
     self.parent.acknowledgementText = """
-      This module was developed by Max (LastName), Arthur Porto and Adam P.Summers for the NSF-REU program at the University of Washington Friday Harbor Laboratories in 2023.
+      This module was developed by Maximilian McKnight, Arthur Porto and Adam P.Summers for the NSF-REU program at the University of Washington Friday Harbor Laboratories in 2023.
       """ # replace with organization, grant and thanks.
 
 #
@@ -58,10 +57,10 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
     parametersFormLayout.addRow("Input volume: ", self.inputFile)
     self.inputFile.currentPath = "/home/max/Projects/fhl-work/holder/data/Otoliths/otoliths_raw/Holder 1 otolithJuanes1_13.8um_2k low res.nii.gz"
     # Select output directory
-    #self.outputDirectory=ctk.ctkPathLineEdit()
-    #self.outputDirectory.filters = ctk.ctkPathLineEdit.Dirs
-    #self.outputDirectory.setToolTip( "Select directory for output models: " )
-    #parametersFormLayout.addRow("Output directory: ", self.outputDirectory)
+    self.outputDirectory=ctk.ctkPathLineEdit()
+    self.outputDirectory.filters = ctk.ctkPathLineEdit.Dirs
+    self.outputDirectory.setToolTip( "Select directory for output models: " )
+    parametersFormLayout.addRow("Output directory: ", self.outputDirectory)
 
     #
     # Apply Button
@@ -74,7 +73,7 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
 
     # connections
     self.inputFile.connect('validInputChanged(bool)', self.onSelect)
-    #self.outputDirectory.connect('validInputChanged(bool)', self.onSelect)
+    self.outputDirectory.connect('validInputChanged(bool)', self.onSelect)
     self.applyButton.connect('clicked(bool)', self.onApplyButton)
 
     # Add vertical spacer
@@ -138,21 +137,28 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
     # Grow the segments back to their original size
     apply_edit(name ="Margin", params = (("GrowFactor", 0.10),))
 
-    #get 1nn
     #plan - get centers. get nearest vertical neighbor, group those. print those groups. name them.
-    segmentNames = segmentationNode.GetSegmentation().GetSegmentIDs()
-    cords = [(segmentationNode.GetSegmentCenterRAS(id)) for id in segmentNames]
-    distTree = sci.spatial.KDTree(cords)
-    # nearest = [(point,distTree.query(point, k=1)) for point in cords]
-    nearest = distTree.query(cords, k = 2)
-    print(list(enumerate(nearest[1][:,1])))
+    segmentNames = segmentationNode.GetSegmentation().GetSegmentIDs() # get a list of segment names to reference segements
+    cords = [(segmentationNode.GetSegmentCenterRAS(id)) for id in segmentNames] # get cords of each segment
+    distTree = sci.spatial.KDTree(cords) #create a tree to calulate nearest segments
+    nearest = distTree.query(cords, k = 2)[1][:,1] #get a list of nearest neighbor pairs
+    pairs = enumerate(nearest) #pair each node with its nearest neighbor
+    uniquePairs = {tuple(sorted(pair)) for pair in pairs} # remove duplicate pairs
+    print(pairs)
+    print(uniquePairs)
     # Create a new model node for the segment
-    # shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(
-    #         slicer.mrmlScene)
+    shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(
+            slicer.mrmlScene)
     # for item in shNode.GetItemChildren():
     #   print(item)
-    # outputFolderId = shNode.CreateFolderItem(shNode.GetSceneItemID(),
-    #                                              'ModelsFolder')
+    outputFolderId = shNode.CreateFolderItem(shNode.GetSceneItemID(),
+                                                 'ModelsFolder')
+    for index, pair in enumerate(uniquePairs):
+      print(outputFolderId)
+      folder = shNode.CreateFolderItem(outputFolderId, f"holder-{index}") # create a folder for each holder
+      slicer.modules.segmentations.logic().ExportSegmentsToModels(segmentationNode, [segmentNames[index] for index in pair], folder)
+      shNode.SetItemParent(folder,outputFolderId) # for some reason ExportSegmentsToModels undoes nesting of a node so we need to renest it
+    #Figure out how to export subject heirarchy parent folderid
 
     # slicer.modules.segmentations.logic().ExportVisibleSegmentsToModels(segmentationNode, outputFolderId)
 
