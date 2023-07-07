@@ -1,7 +1,11 @@
+import scipy as sci
 import vtk, qt, ctk, slicer
 from slicer.ScriptedLoadableModule import *
-
-
+from functools import partial
+from sklearn.decomposition import PCA
+from sklearn.cluster import DBSCAN, KMeans
+import numpy as np
+import os
 
 #
 # OtolithSegmenter
@@ -17,13 +21,13 @@ class OtolithSegmenter(ScriptedLoadableModule):
     self.parent.title = "OtolithSegmenter" # TODO make this more human readable by adding spaces
     self.parent.categories = ["Examples"]
     self.parent.dependencies = []
-    self.parent.contributors = ["Arthur Porto"] # replace with "Firstname Lastname (Organization)"
+    self.parent.contributors = ["Arthur Porto", "Maximilian McKnight"] # replace with "Firstname Lastname (Organization)"
     self.parent.helpText = """
       This module takes a volume and segments it using automated approaches. The output segments are converted to models.
       """
     self.parent.helpText += self.getDefaultModuleDocumentationLink()
     self.parent.acknowledgementText = """
-      This module was developed by Max (LastName), Arthur Porto and Adam P.Summers for the NSF-REU program at the University of Washington Friday Harbor Laboratories in 2023.
+      This module was developed by Maximilian McKnight, Arthur Porto and Adam P.Summers for the NSF-REU program at the University of Washington Friday Harbor Laboratories in 2023.
       """ # replace with organization, grant and thanks.
 
 #
@@ -35,11 +39,12 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
     https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
     """
   def onSelect(self):
-    self.applyButton.enabled = bool(self.inputFile.currentPath)# and self.outputDirectory.currentPath
+    self.applyButton.enabled = bool(self.inputFile.currentPath and self.outputDirectory.currentPath)
 
   def setup(self):
     ScriptedLoadableModuleWidget.setup(self)
-
+    # self.inputFile.currentPath = "/home/max/Projects/fhl-work/holder/data/Otoliths/otoliths_raw/Holder 1 otolithJuanes1_13.8um_2k low res.nii.gz"
+    # print(self.inputFile,"t")
     # Parameters Area
     #
     parametersCollapsibleButton = ctk.ctkCollapsibleButton()
@@ -50,17 +55,17 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
     parametersFormLayout = qt.QFormLayout(parametersCollapsibleButton)
 
     # Select input volume
-    self.inputFile=ctk.ctkPathLineEdit()
+    self.inputFile= ctk.ctkPathLineEdit()
     self.inputFile.filters = ctk.ctkPathLineEdit.Files
-    self.inputFile.nameFilters = ["*.nii.gz"] 
+    self.inputFile.nameFilters = ["*.nii.gz"]
     self.inputFile.setToolTip( "Select input volume" )
     parametersFormLayout.addRow("Input volume: ", self.inputFile)
-
+    self.inputFile.currentPath = "/media/ap/Pocket/otho/test.nii.gz"
     # Select output directory
-    #self.outputDirectory=ctk.ctkPathLineEdit()
-    #self.outputDirectory.filters = ctk.ctkPathLineEdit.Dirs
-    #self.outputDirectory.setToolTip( "Select directory for output models: " )
-    #parametersFormLayout.addRow("Output directory: ", self.outputDirectory)
+    self.outputDirectory=ctk.ctkPathLineEdit()
+    self.outputDirectory.filters = ctk.ctkPathLineEdit.Dirs
+    self.outputDirectory.setToolTip( "Select directory for output models: " )
+    parametersFormLayout.addRow("Output directory: ", self.outputDirectory)
 
     #
     # Apply Button
@@ -73,7 +78,7 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
 
     # connections
     self.inputFile.connect('validInputChanged(bool)', self.onSelect)
-    #self.outputDirectory.connect('validInputChanged(bool)', self.onSelect)
+    self.outputDirectory.connect('validInputChanged(bool)', self.onSelect)
     self.applyButton.connect('clicked(bool)', self.onApplyButton)
 
     # Add vertical spacer
@@ -85,7 +90,7 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
 
   def onApplyButton(self):
     logic = OtolithSegmenterLogic()
-    logic.run(self.inputFile.currentPath)#, self.outputDirectory.currentPath)
+    logic.run(self.inputFile.currentPath, self.outputDirectory.currentPath)
 
 #
 # OtolithSegmenterLogic
@@ -100,13 +105,17 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
     Uses ScriptedLoadableModuleLogic base class, available at:
     https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
     """
-  def run(self, inputFile):#, outputDirectory):
+
+  def run(self, inputFile, outputDirectory):
+
+    print("hello world")
     volumeNode = slicer.util.loadVolume(inputFile)
     voxelShrinkSize = 2
 
 
     # Create a new segmentation
     segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+    segmentationNode
     segmentationNode.CreateDefaultDisplayNodes() # only needed for display
     segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
     addedSegmentID = segmentationNode.GetSegmentation().AddEmptySegment("otolith")
@@ -118,43 +127,90 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
     segmentEditorWidget.setMRMLSegmentEditorNode(segmentEditorNode)
     segmentEditorWidget.setSegmentationNode(segmentationNode)
     segmentEditorWidget.setSourceVolumeNode(volumeNode)
+    apply_edit = partial(apply_segment_editor_effect, segmentEditorWidget)
 
 
     # Apply Otsu thresholding
-    segmentEditorWidget.setActiveEffectByName("Threshold")
-    effect = segmentEditorWidget.activeEffect()
-    effect.setParameter("AutomaticThresholdMethod", "Otsu")
-    effect.self().onApply()
+    apply_edit(name = "Threshold", params = (("AutomaticThresholdMethod", "Otsu"),))
 
     # Shrink the segment
-    segmentEditorWidget.setActiveEffectByName("Margin")
-    effect = segmentEditorWidget.activeEffect()
-    effect.setParameter("MarginSizeMm", -0.10)  # Adjust as needed
-    effect.self().onApply()
+    apply_edit(name = "Margin", params = (("MarginSizeMm", -0.10),))
 
     # Apply the islands effect
-    segmentEditorWidget.setActiveEffectByName("Islands")
-    effect = segmentEditorWidget.activeEffect()
-    effect.setParameter("Operation", "SPLIT_ISLANDS_TO_SEGMENTS")
-    effect.setParameter("MinimumSize", "1000")  # Adjust as needed
-    effect.self().onApply()
+    islandParams = (("Operation", "SPLIT_ISLANDS_TO_SEGMENTS"), ("MinimumSize", "1000"))
+    apply_edit("Islands", islandParams)
 
     # Grow the segments back to their original size
-    segmentEditorWidget.setActiveEffectByName("Margin")
-    effect = segmentEditorWidget.activeEffect()
-    effect.setParameter("GrowFactor", 0.10)  # Adjust as needed
-    effect.self().onApply()
+    apply_edit(name ="Margin", params = (("GrowFactor", 0.10),))
+
+    # Get a list of segment IDs
+    segmentNames = segmentationNode.GetSegmentation().GetSegmentIDs()
+
+    # Get coordinates of each segment
+    cords = np.array([(segmentationNode.GetSegmentCenterRAS(id)) for id in segmentNames])
+
+    # Perform PCA
+    pca = PCA(n_components=2)
+    pca_coords = pca.fit_transform(cords)
+
+    # Calculate the centroid of the structures in the original 3D space
+    centroid = np.mean(pca_coords, axis=0)
+
+    # Calculate the distance of each structure from the centroid
+    distances = np.sqrt(np.sum((pca_coords - centroid)**2, axis=1))
+
+    # Use 1/5 of the median distance as the size of the structure
+    structure_size = np.median(distances)*2.2 / 5
+
+    # Perform DBSCAN clustering to group structures that are in the same well
+    dbscan = DBSCAN(eps=structure_size, min_samples=1)
+    labels = dbscan.fit_predict(cords)
+
+    # Pair each group with its distance from the overall centroid and sort the pairs by distance
+    group_cords = np.array([np.mean(pca_coords[labels == label], axis=0) for label in np.unique(labels)])
+    group_distances = np.sqrt(np.sum((group_cords - centroid)**2, axis=1))
+    pairs = sorted(enumerate(group_distances), key=lambda pair: pair[1], reverse=True)
+
+    # For each group, calculate the angle with respect to PC1
+    group_angles = np.arctan2(group_cords[:,1], group_cords[:,0])
+
+    # Cluster the groups into two rows based on their distance from the overall centroid
+    kmeans = KMeans(n_clusters=2, n_init=10)
+    row_labels = kmeans.fit_predict(group_distances.reshape(-1, 1))
+
+    # Sort the groups by row and then by angle within each row
+    outer_row_indices = [i for i, label in enumerate(row_labels) if label == 0]
+    inner_row_indices = [i for i, label in enumerate(row_labels) if label == 1]
+    outer_row_indices.sort(key=lambda i: group_angles[i])
+    inner_row_indices.sort(key=lambda i: group_angles[i])
+    sorted_group_indices = outer_row_indices + inner_row_indices
 
     # Create a new model node for the segment
-    shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(
-            slicer.mrmlScene)
-    outputFolderId = shNode.CreateFolderItem(shNode.GetSceneItemID(),
-                                                 'ModelsFolder')
-    slicer.modules.segmentations.logic().ExportVisibleSegmentsToModels(segmentationNode, outputFolderId)
+    shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
+    outputFolderId = shNode.CreateFolderItem(shNode.GetSceneItemID(), 'ModelsFolder')
+
+    for index, group_index in enumerate(sorted_group_indices):
+        holder_name = f"holder-{index}"
+        folder = shNode.CreateFolderItem(outputFolderId, holder_name) # create a folder for each holder
+        segment_ids_in_group = [segmentNames[i] for i, label in enumerate(labels) if label == group_index]
+        for segment_index, segment_id in enumerate(segment_ids_in_group):
+            model_name = f"{holder_name}-model-{segment_index}"
+            slicer.modules.segmentations.logic().ExportSegmentsToModels(segmentationNode, [segment_id], folder)
+            model_node = slicer.mrmlScene.GetNthNodeByClass(slicer.mrmlScene.GetNumberOfNodesByClass('vtkMRMLModelNode') - 1, 'vtkMRMLModelNode')
+            if model_node is not None:
+                model_node.SetName(model_name)
+                model_directory = os.path.join(outputDirectory, holder_name)
+                os.makedirs(model_directory, exist_ok=True)
+                # Save the model node to the directory
+                slicer.util.saveNode(model_node, os.path.join(model_directory, model_name + ".ply"))
+        shNode.SetItemParent(folder,outputFolderId) # for some reason ExportSegmentsToModels undoes nesting of a node so we need to renest it
+    #Figure out how to export subject heirarchy parent folderid
+
+    # slicer.modules.segmentations.logic().ExportVisibleSegmentsToModels(segmentationNode, outputFolderId)
 
     # Clean up
     segmentEditorWidget = None
-    slicer.mrmlScene.RemoveNode(segmentationNode)
+    # slicer.mrmlScene.RemoveNode(segmentationNode)
 
 
 
@@ -187,4 +243,16 @@ class OtolithSegmenterTest(ScriptedLoadableModuleTest):
       module.  For example, if a developer removes a feature that you depend on,
       your test should break so they know that the feature is needed.
       """
+    slicer.util.selectModule('OtolithSegmenter')
     pass
+
+
+def apply_segment_editor_effect(widget, name: str, params: tuple):
+    widget.setActiveEffectByName(name)
+    effect = widget.activeEffect()
+    #print(params)
+    for param in params:
+      #print(type(param))
+      effect.setParameter(*param)
+    effect.self().onApply()
+    return effect
