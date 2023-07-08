@@ -1,7 +1,11 @@
-import scipy as sci
 import vtk, qt, ctk, slicer
 from slicer.ScriptedLoadableModule import *
 from functools import partial
+from sklearn.decomposition import PCA
+from sklearn.cluster import DBSCAN, KMeans
+import numpy as np
+import os
+
 #
 # OtolithSegmenter
 #
@@ -34,11 +38,11 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
     https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
     """
   def onSelect(self):
-    self.applyButton.enabled = bool(self.inputFile.currentPath)# and self.outputDirectory.currentPath
+    self.applyButton.enabled = bool(self.inputFile.currentPath and self.outputDirectory.currentPath)
 
   def setup(self):
     ScriptedLoadableModuleWidget.setup(self)
-    # self.inputFile.currentPath = "/home/max/Projects/fhl-work/holder/data/Otoliths/otoliths_raw/Holder 1 otolithJuanes1_13.8um_2k low res.nii.gz"
+    
     # print(self.inputFile,"t")
     # Parameters Area
     #
@@ -55,7 +59,11 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
     self.inputFile.nameFilters = ["*.nii.gz"]
     self.inputFile.setToolTip( "Select input volume" )
     parametersFormLayout.addRow("Input volume: ", self.inputFile)
+    
+    #TODO: remove this for release
+    # self.inputFile.currentPath = "/media/ap/Pocket/otho/test.nii.gz"
     self.inputFile.currentPath = "/home/max/Projects/fhl-work/holder/data/Otoliths/otoliths_raw/Holder 1 otolithJuanes1_13.8um_2k low res.nii.gz"
+    
     # Select output directory
     self.outputDirectory=ctk.ctkPathLineEdit()
     self.outputDirectory.filters = ctk.ctkPathLineEdit.Dirs
@@ -85,7 +93,7 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
 
   def onApplyButton(self):
     logic = OtolithSegmenterLogic()
-    logic.run(self.inputFile.currentPath)#, self.outputDirectory.currentPath)
+    logic.run(self.inputFile.currentPath, self.outputDirectory.currentPath)
 
 #
 # OtolithSegmenterLogic
@@ -101,7 +109,8 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
     https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
     """
 
-  def run(self, inputFile):#, outputDirectory):
+  def run(self, inputFile, outputDirectory):
+
     print("hello world")
     volumeNode = slicer.util.loadVolume(inputFile)
     voxelShrinkSize = 2
@@ -109,7 +118,6 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
 
     # Create a new segmentation
     segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
-    segmentationNode
     segmentationNode.CreateDefaultDisplayNodes() # only needed for display
     segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
     addedSegmentID = segmentationNode.GetSegmentation().AddEmptySegment("otolith")
@@ -135,36 +143,91 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
     apply_edit("Islands", islandParams)
 
     # Grow the segments back to their original size
-    apply_edit(name ="Margin", params = (("GrowFactor", 0.10),))
+    apply_edit(name="Margin", params=(("GrowFactor", 0.10),))
 
-    #plan - get centers. get nearest vertical neighbor, group those. print those groups. name them.
-    segmentNames = segmentationNode.GetSegmentation().GetSegmentIDs() # get a list of segment names to reference segements
-    cords = [(segmentationNode.GetSegmentCenterRAS(id)) for id in segmentNames] # get cords of each segment
-    distTree = sci.spatial.KDTree(cords) #create a tree to calulate nearest segments
-    nearest = distTree.query(cords, k = 2)[1][:,1] #get a list of nearest neighbor pairs
-    pairs = enumerate(nearest) #pair each node with its nearest neighbor
-    uniquePairs = {tuple(sorted(pair)) for pair in pairs} # remove duplicate pairs
-    print(pairs)
-    print(uniquePairs)
-    # Create a new model node for the segment
-    shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(
-            slicer.mrmlScene)
-    # for item in shNode.GetItemChildren():
-    #   print(item)
-    outputFolderId = shNode.CreateFolderItem(shNode.GetSceneItemID(),
-                                                 'ModelsFolder')
-    for index, pair in enumerate(uniquePairs):
-      print(outputFolderId)
-      folder = shNode.CreateFolderItem(outputFolderId, f"holder-{index}") # create a folder for each holder
-      slicer.modules.segmentations.logic().ExportSegmentsToModels(segmentationNode, [segmentNames[index] for index in pair], folder)
-      shNode.SetItemParent(folder,outputFolderId) # for some reason ExportSegmentsToModels undoes nesting of a node so we need to renest it
+# PCA based clustering #TODO: pick/develop clustering algo
+
+    # Get a list of segment IDs
+    segmentNames = segmentationNode.GetSegmentation().GetSegmentIDs()
+
+    # Get coordinates of each segment
+    cords = np.array([(segmentationNode.GetSegmentCenterRAS(id)) for id in segmentNames])
+
+    # Perform PCA
+    pca = PCA(n_components=2)
+    pca_coords = pca.fit_transform(cords)
+
+    # Calculate the centroid of the structures in the original 3D space
+    centroid = np.mean(pca_coords, axis=0)
+
+    # Calculate the distance of each structure from the centroid
+    distances = np.sqrt(np.sum((pca_coords - centroid)**2, axis=1))
+
+    # Use 1/5 of the median distance as the size of the structure
+    structure_size = np.median(distances)*2.2 / 5
+
+    # Perform DBSCAN clustering to group structures that are in the same well
+    dbscan = DBSCAN(eps=structure_size, min_samples=1)
+    labels = dbscan.fit_predict(cords)
+
+    # Pair each group with its distance from the overall centroid and sort the pairs by distance
+    group_cords = np.array([np.mean(pca_coords[labels == label], axis=0) for label in np.unique(labels)])
+    group_distances = np.sqrt(np.sum((group_cords - centroid)**2, axis=1))
+    pairs = sorted(enumerate(group_distances), key=lambda pair: pair[1], reverse=True)
+
+    # For each group, calculate the angle with respect to PC1
+    group_angles = np.arctan2(group_cords[:,1], group_cords[:,0])
+
+    # Cluster the groups into two rows based on their distance from the overall centroid
+    kmeans = KMeans(n_clusters=2, n_init=10)
+    row_labels = kmeans.fit_predict(group_distances.reshape(-1, 1))
+
+    # Sort the groups by row and then by angle within each row
+    outer_row_indices = [i for i, label in enumerate(row_labels) if label == 0]
+    inner_row_indices = [i for i, label in enumerate(row_labels) if label == 1]
+    outer_row_indices.sort(key=lambda i: group_angles[i])
+    inner_row_indices.sort(key=lambda i: group_angles[i])
+    sorted_group_indices = outer_row_indices + inner_row_indices
+   
+    
+  # simple NN clustering 
+
+    # #plan - get centers. get nearest vertical neighbor, group those. print those groups. name them.
+    # segmentNames = segmentationNode.GetSegmentation().GetSegmentIDs() # get a list of segment names to reference segements
+    # cords = [(segmentationNode.GetSegmentCenterRAS(id)) for id in segmentNames] # get cords of each segment
+    # distTree = sci.spatial.KDTree(cords) #create a tree to calulate nearest segments
+    # nearest = distTree.query(cords, k = 2)[1][:,1] #get a list of nearest neighbor pairs
+    # pairs = enumerate(nearest) #pair each node with its nearest neighbor
+    # uniquePairs = {tuple(sorted(pair)) for pair in pairs} # remove duplicate pairs
+    # print(pairs)
+    # print(uniquePairs)
+
+    # Export node TODO: review and potential cleanup/extract into function
+    shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
+    outputFolderId = shNode.CreateFolderItem(shNode.GetSceneItemID(), 'ModelsFolder')
+
+    for index, group_index in enumerate(sorted_group_indices):
+        holder_name = f"holder-{index}"
+        folder = shNode.CreateFolderItem(outputFolderId, holder_name) # create a folder for each holder
+        segment_ids_in_group = [segmentNames[i] for i, label in enumerate(labels) if label == group_index]
+        for segment_index, segment_id in enumerate(segment_ids_in_group):
+            model_name = f"{holder_name}-model-{segment_index}"
+            slicer.modules.segmentations.logic().ExportSegmentsToModels(segmentationNode, [segment_id], folder)
+            model_node = slicer.mrmlScene.GetNthNodeByClass(slicer.mrmlScene.GetNumberOfNodesByClass('vtkMRMLModelNode') - 1, 'vtkMRMLModelNode')
+            if model_node is not None:
+                model_node.SetName(model_name)
+                model_directory = os.path.join(outputDirectory, holder_name)
+                os.makedirs(model_directory, exist_ok=True)
+                # Save the model node to the directory
+                slicer.util.saveNode(model_node, os.path.join(model_directory, model_name + ".ply"))
+        shNode.SetItemParent(folder,outputFolderId) # for some reason ExportSegmentsToModels undoes nesting of a node so we need to renest it
     #Figure out how to export subject heirarchy parent folderid
 
     # slicer.modules.segmentations.logic().ExportVisibleSegmentsToModels(segmentationNode, outputFolderId)
 
     # Clean up
     segmentEditorWidget = None
-    # slicer.mrmlScene.RemoveNode(segmentationNode)
+    # slicer.mrmlScene.RemoveNode(segmentationNode) #TODO: uncomment after dev finished
 
 
 
@@ -204,9 +267,9 @@ class OtolithSegmenterTest(ScriptedLoadableModuleTest):
 def apply_segment_editor_effect(widget, name: str, params: tuple):
     widget.setActiveEffectByName(name)
     effect = widget.activeEffect()
-    print(params)
+    #print(params)
     for param in params:
-      print(type(param))
+      #print(type(param))
       effect.setParameter(*param)
     effect.self().onApply()
     return effect
