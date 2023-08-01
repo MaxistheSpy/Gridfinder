@@ -1,12 +1,11 @@
 import vtk, qt, ctk, slicer
 from slicer.ScriptedLoadableModule import *
 from functools import partial
-from sklearn.decomposition import PCA
-from sklearn.cluster import DBSCAN, KMeans
 import numpy as np
+import cv2
 import os
-
-
+slicer.util.pip_install('imutils')
+from Otolith_segmenter_utils.gridfinder_finalized import pair_otoliths_to_grid
 #
 # OtolithSegmenter
 #
@@ -20,7 +19,7 @@ class OtolithSegmenter(ScriptedLoadableModule):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = "OtolithSegmenter"  # TODO make this more human readable by adding spaces
         self.parent.categories = ["Examples"]
-        self.parent.dependencies = []
+        self.parent.dependencies = ['OpenCV']
         self.parent.contributors = ["Arthur Porto",
                                     "Maximilian McKnight"]  # replace with "Firstname Lastname (Organization)"
         self.parent.helpText = """
@@ -66,13 +65,14 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
 
         # TODO: remove this for release
         # self.inputFile.currentPath = "/media/ap/Pocket/otho/test.nii.gz"
-        self.inputFile.currentPath = "/home/max/Projects/fhl-work/holder/data/Otoliths/otoliths_raw/Holder 1 otolithJuanes1_13.8um_2k low res.nii.gz"
+        self.inputFile.currentPath = "/home/max/Projects/test/cod2_27um_2k_top.nii.gz"
 
         # Select output directory
         self.outputDirectory = ctk.ctkPathLineEdit()
         self.outputDirectory.filters = ctk.ctkPathLineEdit.Dirs
         self.outputDirectory.setToolTip("Select directory for output models: ")
         parametersFormLayout.addRow("Output directory: ", self.outputDirectory)
+        self.outputDirectory.currentPath = "/home/max/Projects/test/junk"
 
         #
         # Apply Button
@@ -113,6 +113,43 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
       """
 
     def run(self, inputFile, outputDirectory):
+        def IJK_to_RAS_points(RAS_points, volumeNode):
+            IJK_matrix = get_IJK_matrix(volumeNode)
+            translation = get_translation_node(volumeNode)
+
+            if translation:
+                RAS_points = [translation.TransformPoint(point[0:3]) for point in RAS_points]
+
+            RAS_points = np.hstack((RAS_points, np.ones(RAS_points.shape[0]).reshape(-1, 1))).T
+            transformed_points = np.matmul(IJK_matrix, RAS_points)
+            transformed_points = transformed_points.T[:,:3].astype(int)
+            return transformed_points
+
+        def get_translation_node(volumeNode):
+            transformRasToVolumeRas = vtk.vtkGeneralTransform()
+            parent_transform = volumeNode.GetParentTransformNode()
+            if parent_transform is None:
+                return False
+            slicer.vtkMRMLTransformNode.GetTransformBetweenNodes(None, parent_transform, transformRasToVolumeRas)
+            transform_node = transformRasToVolumeRas
+            return transform_node
+
+        def get_IJK_matrix(volumeNode):
+            RAS_to_IJK = vtk.vtkMatrix4x4()
+            volumeNode.GetRASToIJKMatrix(RAS_to_IJK)
+            RAS_to_IJK_np = slicer.util.arrayFromVTKMatrix(RAS_to_IJK)
+            return RAS_to_IJK_np
+        def IJK_to_RAS_points_alt(RAS_points, volumeNode):
+            [IJK_to_RAS_point(RAS_point, volumeNode) for RAS_point in RAS_points]
+        def IJK_to_RAS_point(RAS_point, volumeNode):
+            RAS_to_IJK = vtk.vtkMatrix4x4()
+            volumeNode.GetRASToIJKMatrix(RAS_to_IJK)
+            translation = get_translation_node(volumeNode)
+            if translation:
+                RAS_point = translation.MultiplyPoint(RAS_point)
+            RAS_point = np.append(RAS_point, 1)
+            transformed_point = RAS_to_IJK.MultiplyPoint(RAS_point)
+            return transformed_point
 
         print("hello world")
         volumeNode = slicer.util.loadVolume(inputFile)
@@ -153,62 +190,21 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
         segmentNames = segmentationNode.GetSegmentation().GetSegmentIDs()
 
         # Get coordinates of each segment
+        volume_array = slicer.util.arrayFromVolume(volumeNode)
         cords = np.array([(segmentationNode.GetSegmentCenterRAS(segment)) for segment in segmentNames])
 
-        # Perform PCA
-        pca = PCA(n_components=2)
-        pca_coords = pca.fit_transform(cords)
 
-        # Calculate the centroid of the structures in the original 3D space
-        centroid = np.mean(pca_coords, axis=0)
 
-        # Calculate the distance of each structure from the centroid
-        distances = np.sqrt(np.sum((pca_coords - centroid) ** 2, axis=1))
+        IJK_cords = IJK_to_RAS_points(cords, volumeNode)
+        wells, _, _ = pair_otoliths_to_grid(volume_array, IJK_cords)
+        print(wells)
+        print(segmentNames)
 
-        # Use 1/5 of the median distance as the size of the structure
-        structure_size = np.median(distances) * 2.2 / 5
 
-        # Perform DBSCAN clustering to group structures that are in the same well
-        dbscan = DBSCAN(eps=structure_size, min_samples=1)
-        labels = dbscan.fit_predict(cords)
-
-        # Pair each group with its distance from the overall centroid and sort the pairs by distance
-        group_cords = np.array([np.mean(pca_coords[labels == label], axis=0) for label in np.unique(labels)])
-        group_distances = np.sqrt(np.sum((group_cords - centroid) ** 2, axis=1))
-        pairs = sorted(enumerate(group_distances), key=lambda pair: pair[1], reverse=True)
-
-        # For each group, calculate the angle with respect to PC1
-        group_angles = np.arctan2(group_cords[:, 1], group_cords[:, 0])
-
-        # Cluster the groups into two rows based on their distance from the overall centroid
-        kmeans = KMeans(n_clusters=2, n_init=10)
-        row_labels = kmeans.fit_predict(group_distances.reshape(-1, 1))
-
-        # Sort the groups by row and then by angle within each row
-        outer_row_indices = [i for i, label in enumerate(row_labels) if label == 0]
-        inner_row_indices = [i for i, label in enumerate(row_labels) if label == 1]
-        outer_row_indices.sort(key=lambda i: group_angles[i])
-        inner_row_indices.sort(key=lambda i: group_angles[i])
-        sorted_well_indices = outer_row_indices + inner_row_indices
-
-        # simple NN clustering
-
-        # #plan - get centers. get nearest vertical neighbor, group those. print those groups. name them.
-        # segmentNames = segmentationNode.GetSegmentation().GetSegmentIDs() # get a list of segment names to reference segements
-        # cords = [(segmentationNode.GetSegmentCenterRAS(id)) for id in segmentNames] # get cords of each segment
-        # distTree = sci.spatial.KDTree(cords) #create a tree to calulate nearest segments
-        # nearest = distTree.query(cords, k = 2)[1][:,1] #get a list of nearest neighbor pairs
-        # pairs = enumerate(nearest) #pair each node with its nearest neighbor
-        # uniquePairs = {tuple(sorted(pair)) for pair in pairs} # remove duplicate pairs
-        # print(pairs)
-        # print(uniquePairs)
 
         # Export node TODO: review and potential cleanup/extract into function
         shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(scene)
         outputFolderId = shNode.CreateFolderItem(shNode.GetSceneItemID(), 'ModelsFolder')
-
-        holder_index_map = {holder: list(np.where(labels == holder)[0]) for holder in set(labels)}
-        print("SGI:", sorted_well_indices, "\n SGN:", segmentNames, "\n LBS", labels, "\n HIM:", holder_index_map)
 
         def export_to_model(segment, folder):
             slicer.modules.segmentations.logic().ExportSegmentsToModels(segmentationNode, [segment], folder)
@@ -216,8 +212,11 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
                                                     'vtkMRMLModelNode')
             return otolith
 
+        well_contents_mapped = [segmentNames[idx] for well in wells for idx in well]
+        print(well_contents_mapped)
         #TODO: this is doing two things, exporting nodes to internal path and external path, fix
-        for index, well in enumerate(sorted_well_indices):
+
+        for index, well_contents in enumerate(well_contents_mapped):
 
             well_name = f"well-{index}"
 
@@ -225,23 +224,25 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
             well_folder = shNode.CreateFolderItem(outputFolderId, well_name)
             model_path = os.path.join(outputDirectory, well_name)
             os.makedirs(model_path, exist_ok=True)
+            print(well_contents)
 
-            segments_in_well = [segmentNames[idx] for idx in holder_index_map[well]]
-
-            for segment_index, segment in enumerate(segments_in_well):
+            for segment_index, segment in enumerate(well_contents):
+                print(segment_index,segment)
                 otolith_node = export_to_model(segment, well_folder)
+                print(otolith_node)
                 if otolith_node is None:
                     continue
+
                 otolith_node.SetName(f"{well_name}-model-{segment_index}")
-                slicer.util.saveNode(otolith_node, os.path.join(model_path, otolith_node.getName() + ".ply"))
+                slicer.util.saveNode(otolith_node, os.path.join(model_path, segment + ".ply"))
             shNode.SetItemParent(well_folder, outputFolderId)  # ExportSegmentsToModels undoes nesting of a node
 
         # Figure out how to export subject heirarchy parent folderid
 
         # slicer.modules.segmentations.logic().ExportVisibleSegmentsToModels(segmentationNode, outputFolderId)
-
-        # Clean up
-        segmentEditorWidget = None
+        #
+        # # Clean up
+        # segmentEditorWidget = None
         # scene.RemoveNode(segmentationNode) #TODO: uncomment after dev finished
 
 
