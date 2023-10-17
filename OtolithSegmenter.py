@@ -1,11 +1,19 @@
+import fastremap
 import vtk, qt, ctk, slicer
 from slicer.ScriptedLoadableModule import *
 from functools import partial
 import numpy as np
-import cv2
 import os
 slicer.util.pip_install('imutils')
+slicer.util.pip_install('connected-components-3d')
+slicer.util.pip_install('fastremap')
+from Otolith_segmenter_utils.fastsegment import get_segments_from_matrix
 from Otolith_segmenter_utils.gridfinder_finalized import pair_otoliths_to_grid
+import Otolith_segmenter_utils.env_paths as env
+import cc3d
+from Otolith_segmenter_utils.general_utils import timer
+from Otolith_segmenter_utils import fastsegment
+import scipy
 #
 # OtolithSegmenter
 #
@@ -63,16 +71,15 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
         self.inputFile.setToolTip("Select input volume")
         parametersFormLayout.addRow("Input volume: ", self.inputFile)
 
-        # TODO: remove this for release
-        # self.inputFile.currentPath = "/media/ap/Pocket/otho/test.nii.gz"
-        self.inputFile.currentPath = "/home/max/Projects/test/cod2_27um_2k_top.nii.gz"
+        # TODO: remove preset paths for release
+        self.inputFile.currentPath = env.TESTPATH_IMPORT_FILE
 
         # Select output directory
         self.outputDirectory = ctk.ctkPathLineEdit()
         self.outputDirectory.filters = ctk.ctkPathLineEdit.Dirs
         self.outputDirectory.setToolTip("Select directory for output models: ")
         parametersFormLayout.addRow("Output directory: ", self.outputDirectory)
-        self.outputDirectory.currentPath = "/home/max/Projects/test/junk"
+        self.outputDirectory.currentPath = env.TESTPATH_OUTPUT_FILE
 
         #
         # Apply Button
@@ -82,21 +89,57 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
         self.applyButton.enabled = True
         parametersFormLayout.addRow(self.applyButton)
 
+        #
+        # Import Button
+        #
+        self.importButton = qt.QPushButton("Import")
+        self.importButton.toolTip = "Import Input Volume."
+        self.importButton.enabled = True
+        parametersFormLayout.addRow(self.importButton)
+
+        #
+        # Segment Button
+        #
+        self.segmentButton = qt.QPushButton("Segment")
+        self.segmentButton.toolTip = "Segment Volume"
+        self.segmentButton.enabled = True
+        parametersFormLayout.addRow(self.segmentButton)
+
         # connections
         self.inputFile.connect('validInputChanged(bool)', self.onSelect)
         self.outputDirectory.connect('validInputChanged(bool)', self.onSelect)
         self.applyButton.connect('clicked(bool)', self.onApplyButton)
+        self.importButton.connect('clicked(bool)', self.onImportButton)
+        self.segmentButton.connect('clicked(bool)', self.onSegmentButton)
+        # Define Instance Variables
+        self.volume = None
+        self.segmentation = None
+        self.logic = OtolithSegmenterLogic()
 
         # Add vertical spacer
         self.layout.addStretch(1)
 
     def cleanup(self):
-        pass
+        slicer.mrmlScene.RemoveNode(self.volume)
+        self.volume = None
 
     def onApplyButton(self):
-        logic = OtolithSegmenterLogic()
-        logic.run(self.inputFile.currentPath, self.outputDirectory.currentPath)
+        return
+        if self.volume is not None:
+            self.logic.run(self.inputFile.currentPath, self.outputDirectory.currentPath, self.volume)
+        else:
+            self.logic.run(self.inputFile.currentPath, self.outputDirectory.currentPath)
 
+    def onImportButton(self):
+        if self.volume == None:
+            self.volume = self.logic.importVolume(self.inputFile.currentPath)
+    def onSegmentButton(self):
+        if self.volume is not None:
+            with timer("segment"):
+                self.segmentation = self.logic.segment(self.volume,slicer.mrmlScene)
+        else:
+            self.onImportButton()
+            self.onSegmentButton()
 
 #
 # OtolithSegmenterLogic
@@ -111,82 +154,142 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
       Uses ScriptedLoadableModuleLogic base class, available at:
       https://github.com/Slicer/Slicer/blob/master/Base/Python/slicer/ScriptedLoadableModule.py
       """
+    def importVolume(self, inputFile):
+        return slicer.util.loadVolume(inputFile)
+    @staticmethod
+    def IJK_to_RAS_points(RAS_points, volumeNode):
+        logic = OtolithSegmenterLogic()
+        IJK_matrix = logic.get_IJK_matrix(volumeNode)
+        translation = logic.get_translation_node(volumeNode)
 
-    def run(self, inputFile, outputDirectory):
-        def IJK_to_RAS_points(RAS_points, volumeNode):
-            IJK_matrix = get_IJK_matrix(volumeNode)
-            translation = get_translation_node(volumeNode)
+        if translation:
+            RAS_points = [translation.TransformPoint(point[0:3]) for point in RAS_points]
 
-            if translation:
-                RAS_points = [translation.TransformPoint(point[0:3]) for point in RAS_points]
+        RAS_points = np.hstack((RAS_points, np.ones(RAS_points.shape[0]).reshape(-1, 1))).T
+        transformed_points = np.matmul(IJK_matrix, RAS_points)
+        transformed_points = transformed_points.T[:, :3].astype(int)
+        return transformed_points
 
-            RAS_points = np.hstack((RAS_points, np.ones(RAS_points.shape[0]).reshape(-1, 1))).T
-            transformed_points = np.matmul(IJK_matrix, RAS_points)
-            transformed_points = transformed_points.T[:,:3].astype(int)
-            return transformed_points
+    @staticmethod
+    def get_IJK_matrix(volumeNode):
+        """
+        Takes in a volume node and gets the RAS to IJK matrix associated with that node and returns it as a numpy array
+        """
 
-        def get_translation_node(volumeNode):
-            transformRasToVolumeRas = vtk.vtkGeneralTransform()
-            parent_transform = volumeNode.GetParentTransformNode()
-            if parent_transform is None:
-                return False
-            slicer.vtkMRMLTransformNode.GetTransformBetweenNodes(None, parent_transform, transformRasToVolumeRas)
-            transform_node = transformRasToVolumeRas
-            return transform_node
+        RAS_to_IJK = vtk.vtkMatrix4x4()
+        volumeNode.GetRASToIJKMatrix(RAS_to_IJK)
+        RAS_to_IJK_np = slicer.util.arrayFromVTKMatrix(RAS_to_IJK)
+        return RAS_to_IJK_np
 
-        def get_IJK_matrix(volumeNode):
-            RAS_to_IJK = vtk.vtkMatrix4x4()
-            volumeNode.GetRASToIJKMatrix(RAS_to_IJK)
-            RAS_to_IJK_np = slicer.util.arrayFromVTKMatrix(RAS_to_IJK)
-            return RAS_to_IJK_np
-        def IJK_to_RAS_points_alt(RAS_points, volumeNode):
-            [IJK_to_RAS_point(RAS_point, volumeNode) for RAS_point in RAS_points]
-        def IJK_to_RAS_point(RAS_point, volumeNode):
-            RAS_to_IJK = vtk.vtkMatrix4x4()
-            volumeNode.GetRASToIJKMatrix(RAS_to_IJK)
-            translation = get_translation_node(volumeNode)
-            if translation:
-                RAS_point = translation.MultiplyPoint(RAS_point)
-            RAS_point = np.append(RAS_point, 1)
-            transformed_point = RAS_to_IJK.MultiplyPoint(RAS_point)
-            return transformed_point
+    @staticmethod
+    def IJK_to_RAS_point(RAS_point, volumeNode):
+        logic = OtolithSegmenterLogic()
+        RAS_to_IJK = vtk.vtkMatrix4x4()
+        volumeNode.GetRASToIJKMatrix(RAS_to_IJK)
+        translation = logic.get_translation_node(volumeNode)
+        if translation:
+            RAS_point = translation.MultiplyPoint(RAS_point)
+        RAS_point = np.append(RAS_point, 1)
+        transformed_point = RAS_to_IJK.MultiplyPoint(RAS_point)
+        return transformed_point
 
+    @staticmethod
+    def get_translation_node(volumeNode):
+        transformRasToVolumeRas = vtk.vtkGeneralTransform()
+        parent_transform = volumeNode.GetParentTransformNode()
+        if parent_transform is None:
+            return False
+        slicer.vtkMRMLTransformNode.GetTransformBetweenNodes(None, parent_transform, transformRasToVolumeRas)
+        transform_node = transformRasToVolumeRas
+        return transform_node
+    @staticmethod
+    def segment(volumeNode,scene,threshold=63,larger_than=1000,connectivity=26):
+        # Create a new segmentation Node
+        segmentationNode = scene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+        segmentationNode.CreateDefaultDisplayNodes() # only needed for display
+        segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
+        # Create labelmap node
+        labelmapVolumeNode = scene.AddNewNodeByClass('vtkMRMLLabelMapVolumeNode')
+        # export volumeNode to numpy
+        volume_array = slicer.util.arrayFromVolume(volumeNode)
+        # threshold volume
+        # label connected components
+
+        #TODO: Improve memory useage with CC3D
+        mask, n = cc3d.connected_components(volume_array > threshold, connectivity=connectivity, return_N=True)
+        voxels, extents, centroids = cc3d.statistics(mask).values()
+
+        #TODO: verify this wont accidentally remove a segment
+        #NOTE: this code should remove the segment calculated from 0 which will normally be largest so we want to toss it
+        voxels_sans_zero = voxels
+        voxels_sans_zero[0] = 0
+        print(voxels_sans_zero[:50])
+        valid_idxs = np.argwhere(voxels_sans_zero > larger_than)
+        if valid_idxs == []:
+            print("No valid segments found")
+            return
+        ranks = scipy.stats.rankdata(-voxels[valid_idxs], method='ordinal')
+        #create dict to remap labels
+        arr = np.zeros(len(voxels))
+        for rank_idx,list_idx in enumerate(valid_idxs):
+            arr[list_idx] = ranks[rank_idx]
+        dict = {idx:rank for idx,rank in enumerate(arr)}
+        #remap labels
+        mask = fastremap.remap(mask,dict,in_place=True)
+        # import npy array to labelmap
+        slicer.util.updateVolumeFromArray(labelmapVolumeNode, mask)
+        labelmapVolumeNode.SetOrigin(volumeNode.GetOrigin())
+
+        # import labelmap to segmentation node
+        slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelmapVolumeNode, segmentationNode)
+        slicer.mrmlScene.RemoveNode(labelmapVolumeNode)
+        return segmentationNode
+
+
+
+
+    def run(self, inputFile, outputDirectory, volumeNode=None):
+        logic = OtolithSegmenterLogic()
         print("hello world")
-        volumeNode = slicer.util.loadVolume(inputFile)
+        if volumeNode is None:
+            volumeNode = slicer.util.loadVolume(inputFile)
         voxelShrinkSize = 2
         scene = slicer.mrmlScene
 
-        # Create a new segmentation
-        segmentationNode = scene.AddNewNodeByClass("vtkMRMLSegmentationNode")
-        segmentationNode.CreateDefaultDisplayNodes()  # only needed for display
-        segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
-        addedSegmentID = segmentationNode.GetSegmentation().AddEmptySegment("otolith")
+        ##### OLD SEGMENTATION METHOD #####
+        # # Create a new segmentation
+        # segmentationNode = scene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+        # segmentationNode.CreateDefaultDisplayNodes()  # only needed for display
+        # segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
+        # addedSegmentID = segmentationNode.GetSegmentation().AddEmptySegment("otolith")
+        #
+        # # Create segment editor to get access to effects
+        # segmentEditorWidget = slicer.qMRMLSegmentEditorWidget()
+        # segmentEditorWidget.setMRMLScene(scene)
+        # segmentEditorNode = scene.AddNewNodeByClass("vtkMRMLSegmentEditorNode")
+        # segmentEditorWidget.setMRMLSegmentEditorNode(segmentEditorNode)
+        # segmentEditorWidget.setSegmentationNode(segmentationNode)
+        # segmentEditorWidget.setSourceVolumeNode(volumeNode)
+        # apply_edit = partial(apply_segment_editor_effect, segmentEditorWidget)
+        #
+        # # Apply Otsu thresholding
+        # apply_edit(name="Threshold", params=(("AutomaticThresholdMethod", "Otsu"),))
+        #
+        # # Shrink the segment
+        # apply_edit(name="Margin", params=(("MarginSizeMm", -0.10),))
+        #
+        # # Apply the islands effect
+        # islandParams = (("Operation", "SPLIT_ISLANDS_TO_SEGMENTS"), ("MinimumSize", "1000"))
+        # apply_edit("Islands", islandParams)
+        #
+        # # Grow the segments back to their original size
+        # apply_edit(name="Margin", params=(("GrowFactor", 0.10),))
+        ##### OLD SEGMENTATION METHOD #####
 
-        # Create segment editor to get access to effects
-        segmentEditorWidget = slicer.qMRMLSegmentEditorWidget()
-        segmentEditorWidget.setMRMLScene(scene)
-        segmentEditorNode = scene.AddNewNodeByClass("vtkMRMLSegmentEditorNode")
-        segmentEditorWidget.setMRMLSegmentEditorNode(segmentEditorNode)
-        segmentEditorWidget.setSegmentationNode(segmentationNode)
-        segmentEditorWidget.setSourceVolumeNode(volumeNode)
-        apply_edit = partial(apply_segment_editor_effect, segmentEditorWidget)
-
-        # Apply Otsu thresholding
-        apply_edit(name="Threshold", params=(("AutomaticThresholdMethod", "Otsu"),))
-
-        # Shrink the segment
-        apply_edit(name="Margin", params=(("MarginSizeMm", -0.10),))
-
-        # Apply the islands effect
-        islandParams = (("Operation", "SPLIT_ISLANDS_TO_SEGMENTS"), ("MinimumSize", "1000"))
-        apply_edit("Islands", islandParams)
-
-        # Grow the segments back to their original size
-        apply_edit(name="Margin", params=(("GrowFactor", 0.10),))
-
-        # PCA based clustering #TODO: pick/develop clustering algo
 
         # Get a list of segment IDs
+
+        segmentationNode = slicer.util.loadSegmentation(inputFile)
         segmentNames = segmentationNode.GetSegmentation().GetSegmentIDs()
 
         # Get coordinates of each segment
@@ -195,7 +298,7 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
 
 
 
-        IJK_cords = IJK_to_RAS_points(cords, volumeNode)
+        IJK_cords = logic.IJK_to_RAS_points(cords, volumeNode)
         wells, _, _ = pair_otoliths_to_grid(volume_array, IJK_cords)
         print(wells)
         print(segmentNames)

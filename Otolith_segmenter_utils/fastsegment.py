@@ -3,7 +3,7 @@ import numpy as np
 import skimage.measure
 from general_utils import timer
 import scipy as sp
-
+import fastremap
 
 # OpenCV made a great point that for binary images,
 # the highest number of provisional labels is
@@ -59,12 +59,10 @@ def get_segments_from_matrix(matrix: np.matrix,threshold: int = 63, filepath: st
             del sorted_table
             if debug:
                 print(labels, slices, centroids)
-
             # relabeling
             label_to_index_dict = dict(zip(list(labels), (np.array(range(1, num_islands + 1), dtype=min_type))))
             mask[~np.isin(mask, labels)] = 0
             min_type = np.min_scalar_type(num_islands)
-            newimage = np.zeros_like(mask, dtype=min_type)
-            for (index, (label, slice)) in enumerate(zip(labels, slices)):
-                newimage[slice] += np.multiply(mask[slice] == label, index + 1, dtype=min_type)
+            fastremap.remap(mask, label_to_index_dict, inplace=True)
+            return mask, labels, slices
         print("done")

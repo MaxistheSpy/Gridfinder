@@ -1,6 +1,6 @@
 test.data/
 .idea/
-env_vars/
+env_paths.py
 venv/
 shapes.png
 foo*
