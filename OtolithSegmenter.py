@@ -1,19 +1,22 @@
-import fastremap
 import vtk, qt, ctk, slicer
 from slicer.ScriptedLoadableModule import *
 from functools import partial
 import numpy as np
+import scipy
 import os
 slicer.util.pip_install('imutils')
 slicer.util.pip_install('connected-components-3d')
 slicer.util.pip_install('fastremap')
-from Otolith_segmenter_utils.fastsegment import get_segments_from_matrix
+slicer.util.pip_install('scikit-image')
+import cc3d
+import fastremap
 from Otolith_segmenter_utils.gridfinder_finalized import pair_otoliths_to_grid
 import Otolith_segmenter_utils.env_paths as env
-import cc3d
 from Otolith_segmenter_utils.general_utils import timer
-from Otolith_segmenter_utils import fastsegment
-import scipy
+from Otolith_segmenter_utils.holder import Holder
+from Otolith_segmenter_utils.well import Well
+from skimage import color
+
 #
 # OtolithSegmenter
 #
@@ -115,31 +118,34 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
         self.volume = None
         self.segmentation = None
         self.logic = OtolithSegmenterLogic()
+        self.holder = None
 
         # Add vertical spacer
         self.layout.addStretch(1)
 
     def cleanup(self):
-        slicer.mrmlScene.RemoveNode(self.volume)
+        # slicer.mrmlScene.RemoveNode(self.segmentation)
+        # slicer.mrmlScene.RemoveNode(self.volume)
         self.volume = None
 
     def onApplyButton(self):
-        return
-        if self.volume is not None:
-            self.logic.run(self.inputFile.currentPath, self.outputDirectory.currentPath, self.volume)
-        else:
-            self.logic.run(self.inputFile.currentPath, self.outputDirectory.currentPath)
+        with timer("full run"):
+            if self.volume is None:
+                self.onImportButton()
+            if self.volume is not None and self.segmentation is None:
+                    self.segmentation = self.logic.segment(self.volume, slicer.mrmlScene)
+            self.holder = self.logic.run(self.inputFile.currentPath, self.outputDirectory.currentPath,
+                                         self.volume, self.segmentation)
+
 
     def onImportButton(self):
         if self.volume == None:
             self.volume = self.logic.importVolume(self.inputFile.currentPath)
     def onSegmentButton(self):
-        if self.volume is not None:
-            with timer("segment"):
-                self.segmentation = self.logic.segment(self.volume,slicer.mrmlScene)
-        else:
+        if self.volume is None:
             self.onImportButton()
-            self.onSegmentButton()
+        if self.volume is not None and self.segmentation is None:
+                self.segmentation = self.logic.segment(self.volume,slicer.mrmlScene)
 
 #
 # OtolithSegmenterLogic
@@ -248,7 +254,7 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
 
 
 
-    def run(self, inputFile, outputDirectory, volumeNode=None):
+    def run(self, inputFile, outputDirectory, volumeNode=None,segmentationNode=None):
         logic = OtolithSegmenterLogic()
         print("hello world")
         if volumeNode is None:
@@ -256,97 +262,75 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
         voxelShrinkSize = 2
         scene = slicer.mrmlScene
 
-        ##### OLD SEGMENTATION METHOD #####
-        # # Create a new segmentation
-        # segmentationNode = scene.AddNewNodeByClass("vtkMRMLSegmentationNode")
-        # segmentationNode.CreateDefaultDisplayNodes()  # only needed for display
-        # segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
-        # addedSegmentID = segmentationNode.GetSegmentation().AddEmptySegment("otolith")
-        #
-        # # Create segment editor to get access to effects
-        # segmentEditorWidget = slicer.qMRMLSegmentEditorWidget()
-        # segmentEditorWidget.setMRMLScene(scene)
-        # segmentEditorNode = scene.AddNewNodeByClass("vtkMRMLSegmentEditorNode")
-        # segmentEditorWidget.setMRMLSegmentEditorNode(segmentEditorNode)
-        # segmentEditorWidget.setSegmentationNode(segmentationNode)
-        # segmentEditorWidget.setSourceVolumeNode(volumeNode)
-        # apply_edit = partial(apply_segment_editor_effect, segmentEditorWidget)
-        #
-        # # Apply Otsu thresholding
-        # apply_edit(name="Threshold", params=(("AutomaticThresholdMethod", "Otsu"),))
-        #
-        # # Shrink the segment
-        # apply_edit(name="Margin", params=(("MarginSizeMm", -0.10),))
-        #
-        # # Apply the islands effect
-        # islandParams = (("Operation", "SPLIT_ISLANDS_TO_SEGMENTS"), ("MinimumSize", "1000"))
-        # apply_edit("Islands", islandParams)
-        #
-        # # Grow the segments back to their original size
-        # apply_edit(name="Margin", params=(("GrowFactor", 0.10),))
-        ##### OLD SEGMENTATION METHOD #####
-
 
         # Get a list of segment IDs
 
-        segmentationNode = slicer.util.loadSegmentation(inputFile)
-        segmentNames = segmentationNode.GetSegmentation().GetSegmentIDs()
+        # segmentationNode = slicer.util.loadSegmentation(inputFile) #Testing?
+        segmentIDs = segmentationNode.GetSegmentation().GetSegmentIDs()
 
         # Get coordinates of each segment
         volume_array = slicer.util.arrayFromVolume(volumeNode)
-        cords = np.array([(segmentationNode.GetSegmentCenterRAS(segment)) for segment in segmentNames])
 
-
-
+        #Get segment coords and convert to IJK
+        cords = np.array([(segmentationNode.GetSegmentCenterRAS(segment)) for segment in segmentIDs])
         IJK_cords = logic.IJK_to_RAS_points(cords, volumeNode)
-        wells, _, _ = pair_otoliths_to_grid(volume_array, IJK_cords)
-        print(wells)
-        print(segmentNames)
+        # find wells from IJK cords
+        well_list, _, _ = pair_otoliths_to_grid(volume_array, IJK_cords) #TODO: Refactor to simplify output
+        print(well_list)
+        print(segmentIDs)
+
+        holder = Holder(segmentIDs,well_list,segmentationNode)
+        print(holder.get_wells())
+        print(holder)
+        # TODO: create export feature
+        # use lab colors to color segments
 
 
 
-        # Export node TODO: review and potential cleanup/extract into function
-        shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(scene)
-        outputFolderId = shNode.CreateFolderItem(shNode.GetSceneItemID(), 'ModelsFolder')
 
-        def export_to_model(segment, folder):
-            slicer.modules.segmentations.logic().ExportSegmentsToModels(segmentationNode, [segment], folder)
-            otolith = scene.GetNthNodeByClass(scene.GetNumberOfNodesByClass('vtkMRMLModelNode') - 1,
-                                                    'vtkMRMLModelNode')
-            return otolith
+        #TODO: Look at this code and see if theres anything useful
 
-        well_contents_mapped = [segmentNames[idx] for well in wells for idx in well]
-        print(well_contents_mapped)
-        #TODO: this is doing two things, exporting nodes to internal path and external path, fix
-
-        for index, well_contents in enumerate(well_contents_mapped):
-
-            well_name = f"well-{index}"
-
-            # create relevant folder in slicer and on system path for well
-            well_folder = shNode.CreateFolderItem(outputFolderId, well_name)
-            model_path = os.path.join(outputDirectory, well_name)
-            os.makedirs(model_path, exist_ok=True)
-            print(well_contents)
-
-            for segment_index, segment in enumerate(well_contents):
-                print(segment_index,segment)
-                otolith_node = export_to_model(segment, well_folder)
-                print(otolith_node)
-                if otolith_node is None:
-                    continue
-
-                otolith_node.SetName(f"{well_name}-model-{segment_index}")
-                slicer.util.saveNode(otolith_node, os.path.join(model_path, segment + ".ply"))
-            shNode.SetItemParent(well_folder, outputFolderId)  # ExportSegmentsToModels undoes nesting of a node
-
-        # Figure out how to export subject heirarchy parent folderid
-
-        # slicer.modules.segmentations.logic().ExportVisibleSegmentsToModels(segmentationNode, outputFolderId)
+        # # Export node
+        # shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(scene)
+        # outputFolderId = shNode.CreateFolderItem(shNode.GetSceneItemID(), 'ModelsFolder')
         #
-        # # Clean up
+        # def export_to_model(segment, folder):
+        #     slicer.modules.segmentations.logic().ExportSegmentsToModels(segmentationNode, [segment], folder)
+        #     otolith = scene.GetNthNodeByClass(scene.GetNumberOfNodesByClass('vtkMRMLModelNode') - 1,
+        #                                             'vtkMRMLModelNode')
+        #     return otolith
+        #
+        # well_contents_mapped = [segmentNames[idx] for well in wells for idx in well]
+        # print(well_contents_mapped)
+        # #TODO: this is doing two things, exporting nodes to internal path and external path, fix
+        #
+        # for index, well_contents in enumerate(well_contents_mapped):
+        #
+        #     well_name = f"well-{index}"
+        #
+        #     # create relevant folder in slicer and on system path for well
+        #     well_folder = shNode.CreateFolderItem(outputFolderId, well_name)
+        #     model_path = os.path.join(outputDirectory, well_name)
+        #     os.makedirs(model_path, exist_ok=True)
+        #     print(well_contents)
+        #
+        #     for segment_index, segment in enumerate(well_contents):
+        #         print(segment_index,segment)
+        #         otolith_node = export_to_model(segment, well_folder)
+        #         print(otolith_node)
+        #         if otolith_node is None:
+        #             continue
+        #
+        #         otolith_node.SetName(f"{well_name}-model-{segment_index}")
+        #         slicer.util.saveNode(otolith_node, os.path.join(model_path, segment + ".ply"))
+        #     shNode.SetItemParent(well_folder, outputFolderId)  # ExportSegmentsToModels undoes nesting of a node
+        # Figure out how to export subject heirarchy parent folderid
+        # slicer.modules.segmentations.logic().ExportVisibleSegmentsToModels(segmentationNode, outputFolderId)
+
+
+        # # Clean up #TODO: Write cleanup function when done
         # segmentEditorWidget = None
-        # scene.RemoveNode(segmentationNode) #TODO: uncomment after dev finished
+        # scene.RemoveNode(segmentationNode)
 
 
 class OtolithSegmenterTest(ScriptedLoadableModuleTest):
