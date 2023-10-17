@@ -12,7 +12,7 @@ KERNAL_SIZE_MID = 5
 KERNAL_SIZE_LARGE = 7
 LINE_MIN_LENGTH_PERCENT = 1 / 4
 HOLDER_MAX_BRIGHTNESS = 65
-
+# ATTEMPT_DOWNSCALING = False #Implement
 
 ### The one function needed to be called from outside this file
 def pair_otoliths_to_grid(volume, otolith_points_3D):
@@ -37,7 +37,15 @@ def pair_otoliths_to_grid(volume, otolith_points_3D):
 
 
 ########################################################################################################################
-
+#Implement function currently unused
+def cut_img_stack(img_stack, cut_position=.5,cut_width=.025):
+    volume_dims = img_stack.shape
+    z_height = volume_dims[0]
+    img_dims = volume_dims[1:]
+    slice_radius = int(cut_width * z_height)
+    middle_slice = int(z_height * cut_position)
+    slices = img_stack[range(middle_slice - slice_radius, middle_slice + slice_radius), :, :]
+    return slices
 
 def straights(img, scale=SHARPEN_KERNAL_PERCENT, fuzz=1, iter=1, doMask=False, sharpen=False):
     vertical = veritcal_sharpen(img, scale, fuzz, iter, sharpen)

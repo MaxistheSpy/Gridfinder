@@ -1,2 +1,9 @@
 test.data/
 .idea/
+env_vars/
+venv/
+shapes.png
+foo*
+scratch*
+.env
+env
