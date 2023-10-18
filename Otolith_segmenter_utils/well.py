@@ -1,10 +1,13 @@
+import numpy as np
+import slicer
 class Well:
-    def __init__(self, ids=[],name ="unnamed-well", color = (0,0,0),segmentNode = None):
+    def __init__(self, ids=[],extents=[],name ="unnamed-well", color = (0,0,0),segmentNode = None):
         #idea have well map ids to positions in the list
         #so that we can quickly find the position of a well
         #alternatively we could have each well printed in order and just not worry about the original list
-        self.name = "well"
+        self.name = name
         self.ids = ids
+        self.extents = extents
         self.color = color
         self.segmentNode = segmentNode
         self.segmentation = segmentNode.GetSegmentation()
@@ -34,5 +37,17 @@ class Well:
         if idx not in self.id_to_position:
             self.id_to_position[idx] = self.real_ids.index(idx)
         return self.segmentation.GetSegment(self.ids[idx])
-
-
+    def export(self,volume,labelmap,volumeNode):
+        logic = slicer.modules.OtolithSegmenterWidget.logic
+        extents = self.extents
+        for idx, id in enumerate(self.ids):
+            lbl = self.segmentation.GetSegment(id).GetLabelValue()
+            segment_arr = np.multiply(volume[extents[id]],(labelmap[extents[id]] == lbl),dtype=volume.dtype)
+            segment_volume = slicer.util.addVolumeFromArray(segment_arr,name=f"{self.name}-{idx}")
+            origin = logic.get_extent_origin_from_reference_volume(volumeNode,extents[id])
+            segment_volume.SetOrigin(origin)
+        return segment_volume
+    def _create_segments(self,volume,labelmap):
+        #self.segmentation.GetSegment(id).SetBinaryLabelmapRepresentationFromArray(array)
+        # segment_arr = np.multiply(volume[self.extents[id]], (labelmap[self.extents[id]] == lbl), dtype=volume.dtype)
+        pass
