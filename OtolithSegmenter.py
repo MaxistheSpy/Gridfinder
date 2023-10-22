@@ -100,14 +100,15 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
         parametersFormLayout.addRow("Input volume: ", self.inputFile)
 
         # TODO: remove preset paths for release
-        self.inputFile.currentPath = env.TESTPATH_IMPORT_FILE
-
+        # self.inputFile.currentPath = env.TESTPATH_IMPORT_FILE #For easy testing
+        self.inputFile.currentPath = None
         # Select output directory
         self.outputDirectory = ctk.ctkPathLineEdit()
         self.outputDirectory.filters = ctk.ctkPathLineEdit.Dirs
         self.outputDirectory.setToolTip("Select directory for output models: ")
         parametersFormLayout.addRow("Output directory: ", self.outputDirectory)
-        self.outputDirectory.currentPath = env.TESTPATH_OUTPUT_FILE
+        # self.outputDirectory.currentPath = env.TESTPATH_OUTPUT_FILE #For east testing
+        self.outputDirectory.currentPath = None
 
 
 
@@ -139,7 +140,7 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
         #
         # CreateManifest Button
         #
-        self.createManifestButton = qt.QPushButton("Create Manifest")
+        self.createManifestButton = qt.QPushButton("Create Manifest In Output Directory")
         self.createManifestButton.toolTip = "Create Well Manifest In Output Directory"
         self.createManifestButton.enabled = True
         parametersFormLayout.addRow(self.createManifestButton)
