@@ -4,7 +4,8 @@ from functools import partial
 import numpy as np
 import scipy
 import os
-
+import pandas as pd
+import csv
 slicer.util.pip_install('imutils')
 slicer.util.pip_install('connected-components-3d')
 slicer.util.pip_install('fastremap')
@@ -13,7 +14,7 @@ import cc3d
 import fastremap
 from Otolith_segmenter_utils.gridfinder_finalized import pair_otoliths_to_grid
 import Otolith_segmenter_utils.env_paths as env
-from Otolith_segmenter_utils.general_utils import timer
+from Otolith_segmenter_utils.general_utils import *
 from Otolith_segmenter_utils.holder import Holder
 from Otolith_segmenter_utils.well import Well
 from skimage import color
@@ -66,6 +67,28 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
         parametersCollapsibleButton.text = "Parameters"
         self.layout.addWidget(parametersCollapsibleButton)
 
+        #add a an interactive table for reanaming of all wells
+        # tableNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode")
+        # col = tableNode.AddColumn()
+        # col.SetName('Name')
+        # col = tableNode.AddColumn()
+        # col.SetName('Visible')
+        # col = tableNode.AddColumn(vtk.vtkFloatArray())
+        # col.SetName('Number')
+        # tableNode.SetColumnType('Visible', vtk.VTK_BIT)
+        # tableNode.AddEmptyRow()
+        # tableNode.AddEmptyRow()
+        # tableNode.AddEmptyRow()
+        # tableNode.SetCellText(1, 0, "ok")
+        # tableNode.SetCellText(1, 1, "1")
+        #
+        # tableView = slicer.qMRMLTableView()
+        # tableView.setMRMLScene(slicer.mrmlScene)
+        # tableView.setMRMLTableNode(tableNode)
+        # tableView.show()
+
+
+
         # Layout within the dummy collapsible button
         parametersFormLayout = qt.QFormLayout(parametersCollapsibleButton)
 
@@ -86,13 +109,7 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
         parametersFormLayout.addRow("Output directory: ", self.outputDirectory)
         self.outputDirectory.currentPath = env.TESTPATH_OUTPUT_FILE
 
-        #
-        # Apply Button
-        #
-        self.applyButton = qt.QPushButton("Apply")
-        self.applyButton.toolTip = "Generate Otolith Segments."
-        self.applyButton.enabled = True
-        parametersFormLayout.addRow(self.applyButton)
+
 
         #
         # Import Button
@@ -111,6 +128,40 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
         parametersFormLayout.addRow(self.segmentButton)
 
         #
+        # Apply Button
+        #
+        self.applyButton = qt.QPushButton("Apply")
+        self.applyButton.toolTip = "Generate Otolith Segments."
+        self.applyButton.enabled = True
+        parametersFormLayout.addRow(self.applyButton)
+
+
+        #
+        # CreateManifest Button
+        #
+        self.createManifestButton = qt.QPushButton("Create Manifest")
+        self.createManifestButton.toolTip = "Create Well Manifest In Output Directory"
+        self.createManifestButton.enabled = True
+        parametersFormLayout.addRow(self.createManifestButton)
+
+
+        # Select input volume
+        self.manifest = ctk.ctkPathLineEdit()
+        self.manifest.filters = ctk.ctkPathLineEdit.Files
+        self.manifest.nameFilters = ["*.csv", "/"]
+        self.manifest.setToolTip("Import Well Name Key")
+        parametersFormLayout.addRow("Manifest Path: ", self.manifest)
+
+
+        #
+        # Update Names Button
+        #
+        self.updateNamesButton = qt.QPushButton("Update Names")
+        self.updateNamesButton.toolTip = "Update Names in Holder for export"
+        self.updateNamesButton.enabled = True
+        parametersFormLayout.addRow(self.updateNamesButton)
+
+        #
         # Export Button
         #
         self.exportButton = qt.QPushButton("Export")
@@ -125,6 +176,8 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
         self.importButton.connect('clicked(bool)', self.onImportButton)
         self.segmentButton.connect('clicked(bool)', self.onSegmentButton)
         self.exportButton.connect('clicked(bool)', self.onExportButton)
+        self.createManifestButton.connect('clicked(bool)', self.onCreateManifestButton)
+        self.updateNamesButton.connect('clicked(bool)', self.onUpdateNamesButton)
         # Define Instance Variables
         self.volume = None
         self.segmentation = None
@@ -139,38 +192,166 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
         self.layout.addStretch(1)
 
     def cleanup(self):
-        # slicer.mrmlScene.RemoveNode(self.segmentation)
-        # slicer.mrmlScene.RemoveNode(self.volume)
+        try:
+            if self.volume:
+                slicer.mrmlScene.RemoveNode(self.volume)
+        except AttributeError:
+            print()
+            pass
+        try:
+            if self.segmentation:
+                slicer.mrmlScene.RemoveNode(self.segmentation)
+        except AttributeError:
+            pass
+        try:
+            if self.volume_list:
+                for volume in self.volume_list:
+                    slicer.mrmlScene.RemoveNode(volume)
+        except AttributeError:
+            pass
         self.volume = None
+        self.segmentation = None
+        self.logic = None
+        self.holder = None
+        self.extents = None
+        self.mask = None
+        self.holder = None
+        self.volume_list = None
+
+
+    #TODO: Investigate render blocker
+    #with slicer.util.RenderBlocker():
+
+    def _import(self):
+        if self.volume is not None:
+            log_print("Volume already loaded")
+            return
+        with timer("import"):
+            self.volume = self.logic.importVolume(self.inputFile.currentPath)
+    def _segment(self):
+        if self.volume is None:
+            log_print("No volume loaded")
+            return
+        if self.segmentation is not None:
+            log_print("Segmentation already exists")
+            return
+        if self.extents is not None:
+            log_print("Extents already exists")
+            return
+        if self.mask is not None:
+            log_print("Mask already exists")
+            return
+        with timer("segment"):
+            self.segmentation, self.extents, self.mask = self.logic.segment(self.volume, slicer.mrmlScene)
+
+    def _apply(self):
+        if self.volume is None:
+            log_print("No volume loaded")
+            return
+        if self.segmentation is None:
+            log_print("Segmentation not yet created")
+            return
+        if self.extents is None:
+            log_print("Extents not yet created")
+            return
+        if self.mask is None:
+            log_print("Mask not yet created")
+            return
+        with timer("run"):
+            self.holder = self.logic.run(self.inputFile.currentPath, self.outputDirectory.currentPath,
+                                             self.volume, self.segmentation,self.extents,self.mask)
+    def _export(self):
+        if self.holder is None:
+            log_print("No holder created")
+            return
+        if self.mask is None:
+            log_print("No mask created")
+            return
+        if self.outputDirectory.currentPath is None:
+            log_print("No output directory selected")
+            return
+        with timer("export"):
+            self.volume_list = self.holder.export_wells_to_volume_list(self.mask,self.outputDirectory.currentPath)
+
+    def onImportButton(self):
+        with slicer.util.RenderBlocker():
+            self._import()
+    def onSegmentButton(self):
+        with slicer.util.RenderBlocker():
+            self._import()
+            self._segment()
 
     def onApplyButton(self):
         with slicer.util.RenderBlocker():
-            with timer("full run"):
-                if self.volume is None:
-                    self.onImportButton()
-                if self.volume is not None and self.segmentation is None:
-                    self.segmentation,self.extents,self.mask = self.logic.segment(self.volume, slicer.mrmlScene)
-                self.holder = self.logic.run(self.inputFile.currentPath, self.outputDirectory.currentPath,
-                                             self.volume, self.segmentation,self.extents,self.mask)
-    #TODO: Investigate render blocker
-    #with slicer.util.RenderBlocker():
-    def onImportButton(self):
-        with slicer.util.RenderBlocker():
-            if self.volume == None:
-                self.volume = self.logic.importVolume(self.inputFile.currentPath)
+            self._import()
+            self._segment()
+            self._apply()
 
-    def onSegmentButton(self):
-        with slicer.util.RenderBlocker():
-            if self.volume is None:
-                self.onImportButton()
-            if self.volume is not None and self.segmentation is None:
-                self.segmentation,self.extents,self.mask = self.logic.segment(self.volume, slicer.mrmlScene)
     def onExportButton(self):
         with slicer.util.RenderBlocker():
+            self._import()
+            self._segment()
             if self.holder is None:
-                self.onApplyButton()
-            with timer("export"):
-                self.volume_list = self.holder.export_wells_to_volume_list(self.mask)
+                self._apply()
+            self._export()
+    #populate table with wells
+    def onCreateManifestButton(self):
+        if self.holder is None:
+            log_print("No holder created")
+            return
+        if self.outputDirectory.currentPath is None:
+            log_print("No output directory selected")
+            return
+        #Create a file called manifest.csv in the output directory
+        #populate the file with the names of the wells
+        #if manifest.csv already exists, overwrite it
+        path = os.path.join(self.outputDirectory.currentPath,"manifest.csv")
+        if os.path.exists(path):
+            log_print("Manifest already exists")
+
+        with open(path, 'w+') as csvfile:
+            fieldnames = ['current_name', 'new_name']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            for well in self.holder.get_wells():
+                writer.writerow({'current_name': well.get_name(), 'new_name': ''})
+                print(well.get_name())
+        print("manifest created")
+        self.manifest.currentPath = path
+    def onUpdateNamesButton(self):
+        if self.holder is None:
+            log_print("No holder created")
+            return
+        if self.manifest.currentPath is None:
+            log_print("No manifest selected")
+            return
+        self.importManifest(self.manifest.currentPath)
+
+    #TODO: Move manifest to holder
+    def importManifest(self,filepath):
+        # import two column csv
+        # first column is current well name
+        # second column is the new name
+        # if first column is empty, print well number mapping not found
+        with open(filepath, 'r') as file:
+            name_dict = list(csv.DictReader(file))
+        #insure no duplicate names in name dict
+        new_names = [name["new_name"] for name in name_dict if name["new_name"] != ""]
+        old_names = [name["current_name"] for name in name_dict if name["current_name"] != ""]
+        if len(new_names) != len(set(new_names)):
+            log_print("Duplicate names in manifest")
+            return
+        rename_dict = {name["current_name"]: name["new_name"] for name in name_dict}
+        for name in old_names:
+            if self.holder.rename_well(name, rename_dict[name]):
+                log_print(f"{name} renamed to {rename_dict[name]}")
+            else:
+                log_print(f"{name} not found in holder")
+
+
+
+
+
 
 
 #
@@ -246,7 +427,7 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
         RAS_to_IJK = vtk.vtkMatrix4x4()
         volumeNode.GetIJKToRASMatrix(RAS_to_IJK)
         origin = RAS_to_IJK.MultiplyPoint(point_in_KJI+[1])
-        print("extent:",extent,"\norigin:",origin,"\npoint:",point,"\npoint in KJI:",point_in_KJI)
+        # print("extent:",extent,"\norigin:",origin,"\npoint:",point,"\npoint in KJI:",point_in_KJI)
         return origin[:3]
 
     @staticmethod
@@ -320,8 +501,8 @@ class OtolithSegmenterLogic(ScriptedLoadableModuleLogic):
         cords = np.array([(segmentationNode.GetSegmentCenterRAS(segment)) for segment in segmentIDs])
         IJK_cords = logic.IJK_to_RAS_points(cords, volumeNode)
         # find wells from IJK cords
-        # well_list, _, _ = pair_otoliths_to_grid(slicer.util.arrayFromVolume(volumeNode), IJK_cords)  # TODO: Refactor to simplify output
-        well_list = list(map(list, list(np.load(env.TESTPATH_QUICKLOAD_WELLS))))
+        well_list, _, _ = pair_otoliths_to_grid(slicer.util.arrayFromVolume(volumeNode), IJK_cords)  # TODO: Refactor to simplify output
+        # well_list = list(map(list, list(np.load(env.TESTPATH_QUICKLOAD_WELLS)))) # for quicker testing
         print(well_list)
         print(segmentIDs)
 

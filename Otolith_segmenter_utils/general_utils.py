@@ -12,3 +12,6 @@ def timer(name: str):
     end_time = time.process_time()
     elapsed_time = end_time - start_time
     print(f"{name} took {time.strftime('%Hh%Mm%Ss', time.gmtime(elapsed_time))}")
+
+def log_print(string):
+    print(string)

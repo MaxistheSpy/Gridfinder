@@ -29,12 +29,25 @@ class Holder:
         return Well(well_ids,{well_id:self.extents[well_id] for well_id in well_ids},name,color,self.segmentationNode)
     def get_wells(self):
         return self.wells
-    def export_wells_to_volume_list(self,mask,volume=None):
+    def get_well_by_name(self,name):
+        if name in self.well_names:
+            return self.wells[self.well_names.index(name)]
+        else:
+            return None
+    def rename_well(self,old_name,new_name):
+        if old_name in self.well_names:
+            idx = self.well_names.index(old_name)
+            self.well_names[idx] = new_name
+            self.wells[idx].set_name(new_name)
+            return True
+        else:
+            return False
+    def export_wells_to_volume_list(self,mask,path,volume=None):
         if volume is None:
             volume = slicer.util.arrayFromVolume(self.volumeNode)
         volume_list = []
         for well in self.wells:
-            volume_list.append(well.export(volume,mask,self.volumeNode))
+            volume_list.append(well.export(volume,mask,self.volumeNode,path))
         return volume_list
     def export_wells_test(self,mask,volume=None):
         if volume is None:

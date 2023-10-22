@@ -1,5 +1,6 @@
 import numpy as np
 import slicer
+import os
 class Well:
     def __init__(self, ids=[],extents=[],name ="unnamed-well", color = (0,0,0),segmentNode = None):
         #idea have well map ids to positions in the list
@@ -26,7 +27,7 @@ class Well:
     def set_well_color(self,color):
         self.color = color
         self._update_colors()
-    def set_name(self,old_name,new_name):
+    def set_name(self,new_name):
         self.name = new_name
         self._update_segment_names()
     def get_ids(self):
@@ -37,15 +38,20 @@ class Well:
         if idx not in self.id_to_position:
             self.id_to_position[idx] = self.real_ids.index(idx)
         return self.segmentation.GetSegment(self.ids[idx])
-    def export(self,volume,labelmap,volumeNode):
+    def export(self,volume,labelmap,volumeNode,path):
         logic = slicer.modules.OtolithSegmenterWidget.logic
         extents = self.extents
+        segment_volume_list = []
+
         for idx, id in enumerate(self.ids):
             lbl = self.segmentation.GetSegment(id).GetLabelValue()
             segment_arr = np.multiply(volume[extents[id]],(labelmap[extents[id]] == lbl),dtype=volume.dtype)
             segment_volume = slicer.util.addVolumeFromArray(segment_arr,name=f"{self.name}-{idx}")
             origin = logic.get_extent_origin_from_reference_volume(volumeNode,extents[id])
             segment_volume.SetOrigin(origin)
+            segment_volume_list.append(segment_volume)
+            node_path = os.path.join(path,f"{self.name}-{idx}.nrrd")
+            slicer.util.saveNode(segment_volume,node_path)
         return segment_volume
     def _create_segments(self,volume,labelmap):
         #self.segmentation.GetSegment(id).SetBinaryLabelmapRepresentationFromArray(array)
