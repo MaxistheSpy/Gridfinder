@@ -1,6 +1,6 @@
 import slicer.util
 
-from well import Well
+from Otolith_segmenter_utils.well import Well
 from skimage import color
 import colorsys
 class Holder:

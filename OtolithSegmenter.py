@@ -4,16 +4,18 @@ from functools import partial
 import numpy as np
 import scipy
 import os
-import pandas as pd
 import csv
 slicer.util.pip_install('imutils')
 slicer.util.pip_install('connected-components-3d')
 slicer.util.pip_install('fastremap')
 slicer.util.pip_install('scikit-image')
+slicer.util.pip_install('pandas')
+slicer.util.pip_install('opencv-python')
+import pandas as pd
 import cc3d
 import fastremap
 from Otolith_segmenter_utils.gridfinder_finalized import pair_otoliths_to_grid
-import Otolith_segmenter_utils.env_paths as env
+#import Otolith_segmenter_utils.env_paths as env
 from Otolith_segmenter_utils.general_utils import *
 from Otolith_segmenter_utils.holder import Holder
 from Otolith_segmenter_utils.well import Well
@@ -33,7 +35,6 @@ class OtolithSegmenter(ScriptedLoadableModule):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = "OtolithSegmenter"  # TODO make this more human readable by adding spaces
         self.parent.categories = ["Examples"]
-        self.parent.dependencies = ['OpenCV']
         self.parent.contributors = ["Arthur Porto",
                                     "Maximilian McKnight"]  # replace with "Firstname Lastname (Organization)"
         self.parent.helpText = """
@@ -100,7 +101,7 @@ class OtolithSegmenterWidget(ScriptedLoadableModuleWidget):
         parametersFormLayout.addRow("Input volume: ", self.inputFile)
 
         # TODO: remove preset paths for release
-        # self.inputFile.currentPath = env.TESTPATH_IMPORT_FILE #For easy testing
+        # self.inputFile.currentPath = .TESTPATH_IMPORT_FILE #For easy testing
         self.inputFile.currentPath = None
         # Select output directory
         self.outputDirectory = ctk.ctkPathLineEdit()
